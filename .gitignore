@@ -3,3 +3,4 @@ out/
 archive/
 output.*
 .DS_Store
+examples/

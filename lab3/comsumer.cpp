@@ -1,19 +1,19 @@
-#include <unistd.h>
-#include <sys/ipc.h>
 #include <iostream>
-#include <sys/shm.h>
 #include <stdexcept>
 #include <string>
 #include <cstring>
 #include <cstdint>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include <sys/sem.h>
+#include <unistd.h>
 
-#define BUFFER_QUEUE_LEN 10
-#define BUFFER_SIZE 1024
-#define SHM_KEY 10
-#define EMPTY_SEM_KEY 1
-#define FULL_SEM_KEY 2
-#define MUTEXT_SEM_KEY 3
+constexpr int BUFFER_QUEUE_LEN = 10;
+constexpr int BUFFER_SIZE = 1024;
+constexpr int SHM_KEY = 10;
+constexpr int EMPTY_SEM_KEY = 1;
+constexpr int FULL_SEM_KEY = 2;
+constexpr int MUTEX_SEM_KEY = 3;
 
 struct ShmStruct
 {
@@ -21,126 +21,177 @@ struct ShmStruct
     int in;
     uint8_t buffer_queue[BUFFER_QUEUE_LEN][BUFFER_SIZE];
 };
+
 union semun
 {
     int val;
     struct semid_ds *buf;
     unsigned short *array;
 };
-typedef uint8_t *Buffer;
-typedef Buffer *BufferQueue;
+
+struct ShmQueue
+{
+    int shm_id;
+    int full_sem_id;
+    int empty_sem_id;
+    int mutex_sem_id;
+};
+
 typedef std::string Product;
 
-int shmid = -1;
-int full_semid = -1;
-int empty_semid = -1;
-int mutex_semid = -1;
-
-// P操作
-void P(int semid)
+void semaphore_op(int sem_id, int op)
 {
-    struct sembuf p = {0, -1, 0};
-    semop(semid, &p, 1);
+    struct sembuf operation = {0, static_cast<short>(op), 0};
+    if (semop(sem_id, &operation, 1) == -1)
+    {
+        throw std::runtime_error("信号量操作失败");
+    }
 }
 
-// V操作
-void V(int semid)
-{
-    struct sembuf v = {0, 1, 0};
-    semop(semid, &v, 1);
-}
+void P(int sem_id) { semaphore_op(sem_id, -1); }
+void V(int sem_id) { semaphore_op(sem_id, 1); }
 
-int get_shm_queue(int shm_key)
+ShmQueue get_shm_queue(int shm_key, int full_sem_key, int empty_sem_key, int mutex_sem_key)
 {
-    int shmid = shmget(shm_key, sizeof(ShmStruct), 0666);
-    if (shmid == -1)
+    ShmQueue queue;
+
+    queue.shm_id = shmget(shm_key, sizeof(ShmStruct), 0666);
+    if (queue.shm_id == -1)
     {
         throw std::runtime_error("共享内存获取失败");
     }
-    return shmid;
+
+    queue.full_sem_id = semget(full_sem_key, 1, 0666);
+    queue.empty_sem_id = semget(empty_sem_key, 1, 0666);
+    queue.mutex_sem_id = semget(mutex_sem_key, 1, 0666);
+
+    if (queue.full_sem_id == -1 || queue.empty_sem_id == -1 || queue.mutex_sem_id == -1)
+    {
+        throw std::runtime_error("信号量获取失败");
+    }
+
+    return queue;
 }
 
-void delete_shm()
+void delete_shm_queue(const ShmQueue &queue)
 {
-    if (semctl(empty_semid, 0, IPC_RMID) == -1)
-    {
-        throw std::runtime_error("删除空缓冲区信号量失败");
-    }
-    if (semctl(full_semid, 0, IPC_RMID) == -1)
-    {
-        throw std::runtime_error("删除已满缓冲区信号量失败");
-    }
-    if (semctl(mutex_semid, 0, IPC_RMID) == -1)
-    {
-        throw std::runtime_error("删除互斥锁信号量失败");
-    }
-    if (shmctl(shmid, IPC_RMID, nullptr) == -1)
-    {
-        throw std::runtime_error("删除共享内存区失败");
-    }
+    if (semctl(queue.empty_sem_id, 0, IPC_RMID) == -1)
+        throw std::runtime_error("删除empty信号量失败");
+    if (semctl(queue.full_sem_id, 0, IPC_RMID) == -1)
+        throw std::runtime_error("删除full信号量失败");
+    if (semctl(queue.mutex_sem_id, 0, IPC_RMID) == -1)
+        throw std::runtime_error("删除mutex信号量失败");
+    if (shmctl(queue.shm_id, IPC_RMID, nullptr) == -1)
+        throw std::runtime_error("删除共享内存失败");
+
     std::cout << "共享内存和信号量已成功删除" << std::endl;
 }
 
-Product consum_item()
+Product consume_item(const ShmQueue &queue)
 {
-    Product product;
-    ShmStruct *shm_addr = (ShmStruct *)shmat(shmid, nullptr, 0);
+    ShmStruct *shm_addr = (ShmStruct *)shmat(queue.shm_id, nullptr, 0);
     if (shm_addr == (ShmStruct *)-1)
     {
         throw std::runtime_error("映射共享内存失败");
     }
 
     int index = shm_addr->out;
-    product.assign((char *)shm_addr->buffer_queue[index]);
+    Product product((char *)shm_addr->buffer_queue[index]);
     shm_addr->out = (shm_addr->out + 1) % BUFFER_QUEUE_LEN;
+
     shmdt(shm_addr);
     return product;
 }
 
-void consum()
+void consume(const ShmQueue &queue)
 {
-    P(full_semid);
-    P(mutex_semid);
+    P(queue.full_sem_id);
+    P(queue.mutex_sem_id);
 
-    Product product = consum_item();
+    Product product = consume_item(queue);
     std::cout << "消费产品: " << product << std::endl;
 
-    V(mutex_semid);
-    V(empty_semid);
+    V(queue.mutex_sem_id);
+    V(queue.empty_sem_id);
+}
+
+void scan_shm(const ShmQueue &queue)
+{
+    ShmStruct *shm_addr = (ShmStruct *)shmat(queue.shm_id, nullptr, 0);
+    if (shm_addr == (ShmStruct *)-1)
+    {
+        throw std::runtime_error("共享内存映射失败");
+    }
+
+    std::cout << "共享内存内容:" << std::endl;
+    for (int i = shm_addr->out; i != shm_addr->in; i = (i + 1) % BUFFER_QUEUE_LEN)
+    {
+        std::cout << "索引 " << i << " -> 内容: ";
+        for (int j = 0; j < BUFFER_SIZE; j++)
+        {
+            char ch = (char)(shm_addr->buffer_queue[i][j]);
+            if (ch == '\0')
+            {
+                break;
+            }
+            std::cout << ch;
+        }
+        std::cout << std::endl;
+    }
+    shmdt(shm_addr);
 }
 
 int main()
 {
     try
     {
-        shmid = get_shm_queue(SHM_KEY);
-        full_semid = semget(FULL_SEM_KEY, 1, 0666);
-        empty_semid = semget(EMPTY_SEM_KEY, 1, 0666);
-        mutex_semid = semget(MUTEXT_SEM_KEY, 1, 0666);
+        ShmQueue queue = get_shm_queue(SHM_KEY, FULL_SEM_KEY, EMPTY_SEM_KEY, MUTEX_SEM_KEY);
+        std::cout << "获取共享内存区,ID: " << queue.shm_id << std::endl;
+        bool running = true;
+
+        while (running)
+        {
+            std::cout << "消费者进程: 1.消费产品；2.查看共享内存内容；3.删除信号量和共享内存；4.退出" << std::endl;
+            int op;
+            std::cin >> op;
+
+            if (std::cin.fail())
+            {
+                std::cin.clear();
+                std::cin.ignore(1000, '\n');
+                std::cerr << "无效选项" << std::endl;
+                continue;
+            }
+
+            switch (op)
+            {
+            case 1:
+                consume(queue);
+                break;
+            case 2:
+                try
+                {
+                    delete_shm_queue(queue);
+                    running = false;
+                }
+                catch (const std::exception &e)
+                {
+                    std::cerr << "删除共享内存和信号量时出错: " << e.what() << std::endl;
+                }
+                break;
+            case 3:
+                running = false;
+                break;
+            default:
+                std::cerr << "无效选项" << std::endl;
+                break;
+            }
+        }
     }
     catch (const std::runtime_error &e)
     {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "错误: " << e.what() << std::endl;
         return 1;
     }
-
-    while (true)
-    {
-        int op = -1;
-        std::cout << "消费者进程: 1.消费产品；2.退出；3.删除信号量和共享内存" << std::endl;
-        std::cin >> op;
-        switch (op)
-        {
-        case 1:
-            consum();
-            break;
-        case 2:
-            return 0;
-        case 3:
-            delete_shm();
-            return 0;
-        default:
-            break;
-        }
-    }
+    return 0;
 }

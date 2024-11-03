@@ -140,7 +140,18 @@ void scan_shm(const ShmQueue &queue)
     }
     shmdt(shm_addr);
 }
-
+void display(const ShmQueue &queue)
+{
+    ShmStruct *shm_addr = (ShmStruct *)shmat(queue.shm_id, nullptr, 0);
+    if (shm_addr == (ShmStruct *)-1)
+    {
+        throw std::runtime_error("共享内存映射失败");
+    }
+    std::cout << "\t共享内存缓冲队列in指针: " << shm_addr->out << std::endl;
+    std::cout << "\tfull_sem_id: " << queue.full_sem_id << std::endl;
+    std::cout << "\tempty_sem_id: " << queue.empty_sem_id << std::endl;
+    std::cout << "\tmutex_sem_id: " << queue.mutex_sem_id << std::endl;
+}
 int main()
 {
     try
@@ -166,7 +177,11 @@ int main()
             switch (op)
             {
             case 1:
+                std::cout << "共享内存指针与信号量信息,前:" << std::endl;
+                display(queue);
                 consume(queue);
+                std::cout << "共享内存指针与信号量信息,后:" << std::endl;
+                display(queue);
                 break;
             case 2:
                 try

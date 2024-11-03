@@ -68,7 +68,7 @@ ShmQueue init_shm_queue(int shm_key, int full_sem_key, int empty_sem_key, int mu
         throw std::runtime_error("内存映射失败");
     }
     bool is_first_creation = !shm_addr->initialized;
-    std::cout << "is_first_creation:" << is_first_creation << std::endl;
+    // std::cout << "is_first_creation:" << is_first_creation << std::endl;
     if (is_first_creation)
     {
         shm_addr->out = 0;
@@ -115,6 +115,7 @@ void insert_item(const ShmQueue &queue, const Product &item)
     }
 
     int index = shm_addr->in;
+    memset(shm_addr->buffer_queue[index], 0, BUFFER_SIZE);
     strncpy((char *)shm_addr->buffer_queue[index], item.c_str(), BUFFER_SIZE - 1);
     shm_addr->buffer_queue[index][BUFFER_SIZE - 1] = '\0';
     shm_addr->in = (shm_addr->in + 1) % BUFFER_QUEUE_LEN;
@@ -172,7 +173,21 @@ void scan_shm(const ShmQueue &queue)
 
     shmdt(shm_addr);
 }
-
+void display(const ShmQueue &queue)
+{
+    ShmStruct *shm_addr = (ShmStruct *)shmat(queue.shm_id, nullptr, 0);
+    if (shm_addr == (ShmStruct *)-1)
+    {
+        throw std::runtime_error("共享内存映射失败");
+    }
+    int full_sem_val = semctl(queue.full_sem_id, 0, GETVAL);
+    int empty_sem_val = semctl(queue.empty_sem_id, 0, GETVAL);
+    int mutex_sem_val = semctl(queue.mutex_sem_id, 0, GETVAL);
+    std::cout << "\t共享内存缓冲队列in指针: " << shm_addr->in << std::endl;
+    std::cout << "\tfull_sem_val: " << full_sem_val << std::endl;
+    std::cout << "\tempty_sem_val: " << empty_sem_val << std::endl;
+    std::cout << "\tmutex_sem_val: " << mutex_sem_val << std::endl;
+}
 int main()
 {
     try
@@ -196,8 +211,12 @@ int main()
             switch (choice)
             {
             case 1:
+                std::cout << "共享内存指针与信号量信息,前:" << std::endl;
+                display(queue);
                 produce(queue);
-                scan_shm(queue);
+                // scan_shm(queue);
+                std::cout << "共享内存指针与信号量信息,后:" << std::endl;
+                display(queue);
                 break;
             case 2:
                 running = false;
